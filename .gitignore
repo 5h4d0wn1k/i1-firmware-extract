@@ -1,4 +1,12 @@
+# Python artifacts
 __pycache__/
 *.pyc
 *.pyo
+
+# Reports / demo / extraction outputs
+reports/
+extracted/
+
+# OS noise
 .DS_Store
+Thumbs.db

@@ -11,6 +11,9 @@ import hashlib
 import zlib
 import lzma
 import math
+import gzip
+import json
+import argparse
 from collections import namedtuple
 from typing import List, Tuple, Optional
 
@@ -216,6 +219,7 @@ class FirmwareExtractor:
         if not headers:
             print("[!] No recognized filesystem headers found.")
             return entries
+        headers = [h for h in headers if not h.description.startswith("NULL")]
         for i, header in enumerate(headers):
             ext = header.description.split(":")[0].lower().replace(" ", "_")
             out_path = os.path.join(output_dir, f"extract_{i}_{ext}.bin")
@@ -325,17 +329,86 @@ class FirmwareExtractor:
         return f"{size:.2f} TB"
 
 
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python3 firmware_extractor.py <firmware_file> [output_dir]")
-        print("  Analyzes IoT firmware binaries for headers, entropy, and filesystems.")
-        print("  Output directory defaults to ./extracted/")
-        sys.exit(1)
-    filepath = sys.argv[1]
-    output_dir = sys.argv[2] if len(sys.argv) > 2 else "extracted"
-    extractor = FirmwareExtractor(filepath)
-    extractor.full_analysis(output_dir)
-    print(f"\nExtraction complete. Output: {output_dir}/")
+def build_fixture(path: str) -> str:
+    """Deterministically build a lab firmware binary: uImage header + gzip payload + marker text."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    gz_payload = gzip.compress(
+        b"OPENWRT-lab-build squashfs-root/etc/passwd\n"
+        b"root:x:0:0:root:/root:/bin/ash\n"
+        b"etc/config/wireless\n"
+        b"/usr/sbin/lighttpd\n"
+    )
+    header_fields = (
+        0x27051956,      # uImage magic
+        0x00000000,      # header crc
+        0x5F000000,      # timestamp (lab-era)
+        0x00000000,      # size in words (0: OS,1: Arch,2: Type,3: Compression) - OS=0 Linux? use packed
+        0x28,            # data size (low) -- real fields below
+        0x00000000,
+        len(gz_payload),
+        0xDEADBEEF,      # data crc (lab)
+    )
+    packed = struct.pack(">IIIIIIII", *header_fields)
+    # fix packed field[3]=0 -> OS 0 (linux) built correctly:
+    name = b"lab-router-fw"
+    uimage = bytearray(packed + name + b"\x00" * (64 - len(name)))
+    marker = b"admin passwd root openwrt lab-192.0.2.1"
+    fixture = bytes(uimage) + marker + gz_payload
+    with open(path, "wb") as f:
+        f.write(fixture)
+    return path
+
+
+def run_demo(report_dir: str = "reports") -> int:
+    """Offline demo: build fixture, run full analysis, write JSON report. Exit 0."""
+    os.makedirs(report_dir, exist_ok=True)
+    fixtures_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+    fixture = os.path.join(fixtures_dir, "lab-router.bin")
+    build_fixture(fixture)
+    extractor = FirmwareExtractor(fixture)
+    result = extractor.full_analysis(os.path.join(report_dir, "extracted"))
+    report = os.path.join(report_dir, "i1_demo_report.json")
+    with open(report, "w") as f:
+        json.dump(result, f, indent=2, default=str)
+    print(f"[*] JSON report written: {report}")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="firmware_extractor",
+        description="I1 — IoT firmware extractor (header detection, entropy, extraction).")
+    parser.add_argument("firmware", nargs="?", help="firmware binary to analyze (offline demo if omitted)")
+    parser.add_argument("--output-dir", "-o", default="extracted", help="extraction output dir")
+    parser.add_argument("--json", action="store_true", help="write JSON report to reports/")
+    parser.add_argument("--report-dir", default="reports", help="report dir (default: reports)")
+    parser.add_argument("--make-fixture", action="store_true", help="regenerate fixture and exit")
+    args = parser.parse_args()
+
+    if args.make_fixture:
+        fixtures_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+        path = build_fixture(os.path.join(fixtures_dir, "lab-router.bin"))
+        print(f"[*] Fixture written to {path}")
+        return 0
+
+    if not args.firmware:
+        return run_demo(args.report_dir)
+
+    if not os.path.isfile(args.firmware):
+        print(f"[!] Firmware file not found: {args.firmware}")
+        return 2
+
+    extractor = FirmwareExtractor(args.firmware)
+    result = extractor.full_analysis(args.output_dir)
+
+    if args.json:
+        os.makedirs(args.report_dir, exist_ok=True)
+        report = os.path.join(args.report_dir, "i1_report.json")
+        with open(report, "w") as f:
+            json.dump(result, f, indent=2, default=str)
+        print(f"[*] JSON report written: {report}")
+    print(f"\nExtraction complete. Output: {args.output_dir}/")
+    return 0
 
 
 if __name__ == "__main__":

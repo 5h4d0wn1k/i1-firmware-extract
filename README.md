@@ -1,128 +1,91 @@
 # I1 — IoT Firmware Extractor
 
-Binwalk-style firmware parsing, filesystem extraction, header detection, and entropy analysis.
+Binwalk-style firmware analysis: header/signature detection, Shannon entropy
+analysis, string carving, and extraction — plus a deterministic lab firmware
+fixture. Standard-library only.
 
-## Overview
+## What the engine genuinely does
 
-This project implements an IoT firmware analysis toolkit that:
-- Detects firmware headers (uImage, SquashFS, JFFS2, UBI, LZMA, GZIP, etc.)
-- Performs Shannon entropy analysis to find compressed/encrypted regions
-- Extracts and decompresses filesystems from firmware images
-- Scans for printable strings (credentials, config, URLs)
-- Computes file hashes (MD5, SHA256)
+- **Signature scanner** — 16 signatures (uImage, SquashFS LE/BE, UBI/UBIFS,
+  JFFS2, LZMA, ZSTD, 7z, ZIP, gzip, bzip2, XZ, ARM sled, NULL padding) at every
+  offset.
+- **uImage header parsing** — real `>IIIIIIII` unpack: magic, CRC, timestamp,
+  packed OS/arch/type/compression, data size, data CRC, 32-byte name.
+- **SquashFS superblock parsing** — LE (`hsqs`) / BE (`sqsh`) `struct` decode:
+  inodes, block size, fragments, compressor.
+- **Entropy analysis** — per-block Shannon entropy, high-entropy region
+  detection, compressed-data heuristic.
+- **Extraction** — filesystem-header carving to disk and full-gzip
+  decompression (`gzip.decompress`).
+- **Basic info** — size (human-readable), MD5/SHA-256, whole-file entropy.
+- **String carving** — printable-ASCII extraction with "interesting" keyword
+  filtering (pass/admin/root/openwrt/linux).
 
-## Features
-
-- **Header Detection**: Identifies 15+ known firmware and archive signatures
-- **Entropy Analysis**: Block-based Shannon entropy with high-entropy region detection
-- **Filesystem Extraction**: Extracts recognized filesystems from firmware blobs
-- **String Scanning**: Finds interesting strings (passwords, URLs, device info)
-- **uImage Parsing**: Full U-Boot image header parsing with arch/OS/compression info
-- **SquashFS Detection**: Parses SquashFS superblocks for inode count, block size, compressor
-
-## Dependencies
-
-Standard library only (no pip install needed):
-- `struct`, `hashlib`, `zlib`, `lzma`, `math`, `os`
-
-## Usage
+## Quick start
 
 ```bash
-# Analyze a firmware image
-python3 firmware_extractor.py <firmware_file> [output_dir]
+# Offline demo (builds fixtures/lab-router.bin, analyzes, writes reports/, exit 0)
+python3 firmware_extractor.py
 
-# Example
-python3 firmware_extractor.py router_fw.bin ./extracted/
+# Analyze a real firmware binary (yours / you are authorized to handle)
+python3 firmware_extractor.py firmware.bin --output-dir extracted --json
+
+# Rebuild the lab fixture
+python3 firmware_extractor.py --make-fixture
+
+# Tests
+python3 -m unittest discover -s tests
 ```
 
-## Example Output
+## CLI
 
 ```
-============================================================
-  I1 - IoT Firmware Extractor
-============================================================
-
-File: router_fw.bin
-Size: 16.00 MB
-MD5:  a1b2c3d4e5f6...
-SHA256: deadbeef...
-Entropy: 7.8234
-Compressed: True
-
---- Header Detection ---
-  uimage: {'offset': 0, 'magic': '0x27051956', ...}
-  squashfs: {'offset': 65536, 'inodes': 1024, ...}
-
-  Found 5 signature(s):
-    0x0: uImage: U-Boot image header
-    0x10000: SquashFS: SquashFS filesystem (little-endian)
-
---- Entropy Analysis ---
-  block_size: 4096
-  total_blocks: 4096
-  average_entropy: 7.1234
-  high_entropy_blocks: 2048
-
---- String Extraction ---
-  Found 3421 printable strings
-  Interesting strings:
-    root:admin
-    /etc/config/wireless
-
---- Filesystem Extraction ---
-  [+] Extracted uImage at 0x0 -> extracted/extract_0_uimage.bin
-  [+] Extracted SquashFS at 0x10000 -> extracted/extract_1_squashfs.bin
-  Extracted 2 entries
-
-============================================================
+python3 firmware_extractor.py [-h] [firmware] [--output-dir OUTPUT_DIR] [--json]
+                              [--report-dir REPORT_DIR] [--make-fixture]
 ```
 
-## How It Works
+- `firmware` — binary to analyze; omitted → offline demo.
+- `--output-dir/-o` — extraction target (default `extracted`).
+- `--json` — write `reports/` JSON report.
+- `--report-dir` — report directory (default `reports`).
+- `--make-fixture` — regenerate the lab fixture and exit.
 
-1. **Signature scanning**: Brute-force search for known magic bytes throughout the binary
-2. **Entropy calculation**: Shannon entropy on 4KB blocks to distinguish code vs data vs compressed
-3. **Header parsing**: Struct unpacking of uImage (big-endian) and SquashFS superblocks
-4. **Extraction**: LZMA decompression fallback for unrecognized compressed sections
+Exit codes: `0` success (incl. demo), `2` input error.
 
-## Legal Disclaimer
+## Live Lab Test Plan
 
-**IMPORTANT: Read before use.**
+Prerequisites: a firmware image you own or are authorized to examine; the
+`lab-router.bin` fixture stands in offline.
 
-This project is provided for **educational and authorized security testing purposes only**. 
+1. **Baseline**: `python3 firmware_extractor.py` — confirm uImage at offset 0,
+   gzip at 0x87, ≥ 2 extractions, strings contain `admin`/`openwrt`.
+2. **Real target**: run on a permitted image; cross-check uImage/squashfs
+   parsing against `binwalk` output and embedded markers with `strings -n 6`.
+3. **Entropy map**: compare `high_entropy_blocks` regions against compressed
+   segments found by `binwalk -E`.
+4. **Extraction**: verify the carved gzip payload decompresses and matches the
+   rootfs file list (`bash bin/busybox` etc.).
+5. **Regression**: re-run `python3 -m unittest discover -s tests`.
 
-### Authorization Requirements
-- You MUST have explicit written permission from the device owner before analyzing firmware
-- Reverse engineering consumer devices may violate DMCA or local laws
-- This tool should ONLY be used on firmware you own or have written authorization to analyze
+## Metrics
 
-### Legal Framework
-- **Computer Fraud and Abuse Act (CFAA)**: Unauthorized access to computer systems is a federal crime
-- **DMCA Anti-Circumvention (17 U.S.C. § 1201)**: Circumventing technological protection measures may be illegal
-- **State Laws**: Many states have additional computer crime statutes
-- **Export Controls**: Firmware analysis tools may be subject to export regulations
+| Metric                     | Value |
+|----------------------------|-------|
+| Standard-library only      | Yes   |
+| Third-party deps           | none  |
+| Deterministic offline tests| 13    |
+| Fixture                    | `fixtures/lab-router.bin` (uImage + gzip + markers) |
+| Offline demo exit          | 0     |
+| Report output              | `reports/*.json` (gitignored) |
+| Inputs                     | firmware binary |
 
-### Acceptable Use
-- Analyzing firmware from devices you own
-- Authorized security research with written scope
-- Academic research in controlled lab environments
-- Security education and training
-- Contributing to open-source firmware projects
+## IMPORTANT: Read before use.
 
-### Prohibited Use
-- Analyzing firmware from devices you do not own
-- Bypassing DRM or copy protection commercially
-- Any activity that violates applicable laws or regulations
-- Commercial exploitation without proper licensing
-
-### No Warranty
-This software is provided "AS IS" without warranty of any kind. The author is not responsible for any misuse or damage caused by this software.
-
-### Responsible Disclosure
-If you discover vulnerabilities using this tool, follow responsible disclosure practices:
-1. Report to the vendor/owner privately
-2. Allow reasonable time for remediation
-3. Do not exploit beyond proof of concept
+Educational, authorization-required tooling. See `LICENSE` for the full shield —
+Authorization, CFAA / computer-crime statutes, Acceptable Use, Prohibited Use,
+No Warranty, and Responsible Disclosure. Only analyze firmware you own or are
+explicitly authorized to examine.
 
 ## License
 
-MIT
+MIT — full legal shield in `LICENSE`.
