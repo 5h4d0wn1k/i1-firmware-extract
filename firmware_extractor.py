@@ -336,7 +336,8 @@ def build_fixture(path: str) -> str:
         b"OPENWRT-lab-build squashfs-root/etc/passwd\n"
         b"root:x:0:0:root:/root:/bin/ash\n"
         b"etc/config/wireless\n"
-        b"/usr/sbin/lighttpd\n"
+        b"/usr/sbin/lighttpd\n",
+        mtime=0,
     )
     header_fields = (
         0x27051956,      # uImage magic
